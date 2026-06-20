@@ -566,10 +566,15 @@ app.get('/api/public/data', async (_req, res) => {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
-    const { data: profileDb } = await supabase.from('profile').select('*').eq('id', 'main').single().catch(() => ({ data: null }));
-    const { data: projectsDb } = await supabase.from('projects').select('*').catch(() => ({ data: [] }));
-    const { data: skillsDb } = await supabase.from('skills').select('*').catch(() => ({ data: [] }));
-    const { data: expDb } = await supabase.from('experiences').select('*').catch(() => ({ data: [] }));
+    let profileDb = null;
+    let projectsDb: any[] = [];
+    let skillsDb: any[] = [];
+    let expDb: any[] = [];
+
+    try { const r = await supabase.from('profile').select('*').eq('id', 'main').single(); profileDb = r.data; } catch {}
+    try { const r = await supabase.from('projects').select('*'); projectsDb = r.data || []; } catch {}
+    try { const r = await supabase.from('skills').select('*'); skillsDb = r.data || []; } catch {}
+    try { const r = await supabase.from('experiences').select('*'); expDb = r.data || []; } catch {}
 
     return res.json({
       success: true,
