@@ -380,6 +380,60 @@ app.post('/api/admin/experiences', adminLimiter, requireAdminAuth, async (req, r
   }
 });
 
+// Generic image upload to Supabase Storage
+// Expects multipart/form-data: file + folder (optional, default "projects")
+// Returns: { success: true, imageUrl: <signed-url> }
+app.post(
+  '/api/admin/upload-image',
+  adminLimiter,
+  requireAdminAuth,
+  upload.single('file'),
+  async (req, res) => {
+    const supabaseUrl = process.env.SUPABASE_URL || '';
+    const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+    const bucket = process.env.SUPABASE_STORAGE_BUCKET_PROJECTS || 'portfolio-project-images';
+
+    if (!supabaseUrl || !supabaseServiceRoleKey) {
+      return res.status(500).json({ success: false, message: 'Supabase not configured' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'Missing file' });
+    }
+
+    const file = req.file;
+    const folder = String(req.body?.folder || 'projects').trim();
+
+    try {
+      const supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
+        auth: { persistSession: false, autoRefreshToken: false },
+      });
+
+      const ext = path.extname(file.originalname || '').toLowerCase() || '.png';
+      const safeExt = ext.startsWith('.') ? ext.slice(1) : ext;
+      const objectPath = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2)}.${safeExt}`;
+
+      const { error: uploadErr } = await supabase.storage
+        .from(bucket)
+        .upload(objectPath, file.buffer, { contentType: file.mimetype, upsert: true });
+
+      if (uploadErr) throw uploadErr;
+
+      const { data, error: signedUrlErr } = await supabase.storage
+        .from(bucket)
+        .createSignedUrl(objectPath, 7 * 24 * 60 * 60);
+
+      if (signedUrlErr) throw signedUrlErr;
+      if (!data?.signedUrl) {
+        return res.status(500).json({ success: false, message: 'Signed URL missing' });
+      }
+
+      return res.json({ success: true, imageUrl: data.signedUrl });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, message: err?.message || 'Upload failed' });
+    }
+  }
+);
+
 // Upload project image to Supabase Storage (bucket private + signed URL)
 // Expects multipart/form-data with fields:
 // - file: image
