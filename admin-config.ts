@@ -1,5 +1,4 @@
-import fs from 'node:fs';
-import path from 'node:path';
+import { createClient } from '@supabase/supabase-js';
 import bcrypt from 'bcryptjs';
 
 export type AdminConfig = {
@@ -7,60 +6,81 @@ export type AdminConfig = {
   passwordHash: string;
 };
 
-const CONFIG_PATH = path.resolve(process.cwd(), 'admin-config.json');
 const SALT_ROUNDS = 10;
+const DEFAULT_USERNAME = 'admin';
+const DEFAULT_PASSWORD = 'admin123';
 
-function safeReadConfig(): AdminConfig {
+function getSupabaseClient() {
+  const url = process.env.SUPABASE_URL || '';
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  if (!url || !key) return null;
+  return createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+}
+
+async function readConfigFromDb(): Promise<AdminConfig | null> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return null;
+
   try {
-    if (!fs.existsSync(CONFIG_PATH)) {
-      // Initialize with default hashed password: 'admin123'
-      const defaultHash = bcrypt.hashSync('admin123', SALT_ROUNDS);
-      return { username: 'admin', passwordHash: defaultHash };
-    }
-    const raw = fs.readFileSync(CONFIG_PATH, 'utf-8');
-    const parsed = JSON.parse(raw) as Partial<AdminConfig>;
+    const { data, error } = await supabase
+      .from('admin_settings')
+      .select('value')
+      .eq('key', 'admin_password_hash')
+      .single();
+
+    if (error || !data?.value) return null;
 
     return {
-      username: String(parsed.username ?? 'admin'),
-      passwordHash: String(parsed.passwordHash ?? bcrypt.hashSync('admin123', SALT_ROUNDS)),
+      username: DEFAULT_USERNAME,
+      passwordHash: data.value,
     };
   } catch {
-    const defaultHash = bcrypt.hashSync('admin123', SALT_ROUNDS);
-    return { username: 'admin', passwordHash: defaultHash };
+    return null;
   }
 }
 
-export function getAdminConfig(): AdminConfig {
-  return safeReadConfig();
-}
+async function writeConfigToDb(hash: string): Promise<boolean> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return false;
 
-export async function updateAdminPassword(newPassword: string): Promise<boolean> {
   try {
-    const config = safeReadConfig();
-    const newHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
-    const updated = {
-      username: config.username,
-      passwordHash: newHash,
-    };
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), 'utf-8');
-    return true;
-  } catch (err) {
-    console.error('Failed to update password:', err);
+    const { error } = await supabase
+      .from('admin_settings')
+      .upsert({ key: 'admin_password_hash', value: hash, updated_at: new Date().toISOString() });
+
+    return !error;
+  } catch {
     return false;
   }
 }
 
+export async function getAdminConfig(): Promise<AdminConfig> {
+  const dbConfig = await readConfigFromDb();
+  if (dbConfig) return dbConfig;
+
+  // First time: create default password hash and save to DB
+  const defaultHash = await bcrypt.hash(DEFAULT_PASSWORD, SALT_ROUNDS);
+  await writeConfigToDb(defaultHash);
+
+  return {
+    username: DEFAULT_USERNAME,
+    passwordHash: defaultHash,
+  };
+}
+
 export async function verifyPassword(plainPassword: string): Promise<boolean> {
-  const config = safeReadConfig();
+  const config = await getAdminConfig();
   return bcrypt.compare(plainPassword, config.passwordHash);
 }
 
-export function setAdminConfig(next: AdminConfig): void {
-  const payload: AdminConfig = {
-    username: String(next.username),
-    passwordHash: String(next.passwordHash),
-  };
-
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(payload, null, 2), 'utf-8');
+export async function updateAdminPassword(newPassword: string): Promise<boolean> {
+  const newHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
+  return writeConfigToDb(newHash);
 }
 
+// Kept for backward compatibility but now async
+export function setAdminConfig(_next: AdminConfig): void {
+  // No-op: use updateAdminPassword instead
+}

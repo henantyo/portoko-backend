@@ -78,13 +78,13 @@ function issueAdminToken() {
 app.post('/api/admin/login', adminLimiter, async (req, res) => {
   const { username, password } = req.body || {};
 
-  const { username: expectedUsername } = getAdminConfig();
-
-  if (username !== expectedUsername) {
-    return res.status(401).json({ success: false, message: 'ACCESS DENIED: INVALID USERNAME' });
-  }
-
   try {
+    const adminConfig = await getAdminConfig();
+
+    if (username !== adminConfig.username) {
+      return res.status(401).json({ success: false, message: 'ACCESS DENIED: INVALID USERNAME' });
+    }
+
     const isPasswordValid = await verifyPassword(password);
     if (!isPasswordValid) {
       return res.status(401).json({ success: false, message: 'ACCESS DENIED: CRYPTOGRAPHIC DECRYPTION FAILED' });
