@@ -5,648 +5,149 @@ import dotenv from 'dotenv';
 import { createClient } from '@supabase/supabase-js';
 import multer from 'multer';
 import path from 'node:path';
-import { getAdminConfig, verifyPassword, updateAdminPassword } from './admin-config.js';
+import { verifyPassword } from './admin-config.js';
 
-
-dotenv.config({ path: './.env' });
-
-
+dotenv.config();
 
 const app = express();
-
-app.use(
-  cors({
-    origin: '*',
-  })
-);
+app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '1mb' }));
 
-// Multer in-memory storage for multipart uploads (admin)
 const upload = multer({ storage: multer.memoryStorage() });
 
-app.get('/health', (_req, res) => {
-  res.json({ ok: true });
-});
+const adminLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 120 });
 
-app.get('/debug', (_req, res) => {
-  res.json({
-    hasSupabaseUrl: !!process.env.SUPABASE_URL,
-    hasSupabaseKey: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
-    port: process.env.PORT,
-    cwd: process.cwd(),
-  });
-});
-
-// Basic rate limiting (admin endpoints)
-const adminLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 120,
-});
-
-function requireSupabaseConfig(res: express.Response) {
-  const supabaseUrl = process.env.SUPABASE_URL || '';
-  const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-
-  if (!supabaseUrl || !supabaseServiceRoleKey) {
-    res.status(500).json({
-      success: false,
-      message: 'Supabase is not configured on backend. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
-    });
-    return null;
-  }
-
-  return createClient(supabaseUrl, supabaseServiceRoleKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-}
-
-type AdminTokenSet = Set<string>;
-
-function getAdminTokens(): AdminTokenSet {
-  const g = globalThis as any;
-  if (!g.__PORTOKO_ADMIN_TOKENS__) {
-    g.__PORTOKO_ADMIN_TOKENS__ = new Set<string>();
-  }
-  return g.__PORTOKO_ADMIN_TOKENS__ as Set<string>;
-}
-
+// Tokens
+const adminTokens = new Set<string>();
 function issueAdminToken() {
-  // Simple opaque token (educational/local)
   return Math.random().toString(36).slice(2) + '.' + Date.now().toString(36);
 }
-
-app.post('/api/admin/login', adminLimiter, async (req, res) => {
-  const { username, password } = req.body || {};
-
-  try {
-    const adminConfig = await getAdminConfig();
-
-    if (username !== adminConfig.username) {
-      return res.status(401).json({ success: false, message: 'ACCESS DENIED: INVALID USERNAME' });
-    }
-
-    const isPasswordValid = await verifyPassword(password);
-    if (!isPasswordValid) {
-      return res.status(401).json({ success: false, message: 'ACCESS DENIED: CRYPTOGRAPHIC DECRYPTION FAILED' });
-    }
-
-    const token = issueAdminToken();
-    getAdminTokens().add(token);
-
-    return res.json({ success: true, token });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, message: 'AUTH_ERROR: Internal authentication service error' });
-  }
-});
-
-app.post('/api/admin/change-password', adminLimiter, async (req, res) => {
-  const { currentPassword, newPassword } = req.body || {};
-
-  if (!currentPassword || !newPassword) {
-    return res.status(400).json({ success: false, message: 'Missing currentPassword or newPassword' });
-  }
-
-  if (newPassword.length < 6) {
-    return res.status(400).json({ success: false, message: 'New password must be at least 6 characters long' });
-  }
-
-  try {
-    // Verify current password
-    const isCurrentPasswordValid = await verifyPassword(currentPassword);
-    if (!isCurrentPasswordValid) {
-      return res.status(401).json({ success: false, message: 'CURRENT_PASSWORD_INVALID: Cryptographic verification failed' });
-    }
-
-    // Update password
-    const success = await updateAdminPassword(newPassword);
-    if (!success) {
-      throw new Error('Failed to write new password');
-    }
-
-    return res.json({ success: true, message: 'PASSWORD_UPDATED: Admin password changed successfully' });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, message: err?.message || 'Failed to change password' });
-  }
-});
 
 function requireAdminAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
   const authHeader = (req.headers.authorization || '') as string;
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : '';
-
-  if (!token || !getAdminTokens().has(token)) {
+  if (!token || !adminTokens.has(token)) {
     return res.status(401).json({ success: false, message: 'UNAUTHORIZED' });
   }
-
   next();
 }
 
-// Mapping helpers to keep payload aligned with existing frontend types
-function mapProfileToDb(p: any) {
-  return {
-    id: 'main',
-    name: p.name,
-    title: p.title,
-    bio: p.bio,
-    about_long: p.aboutLong,
-    school: p.school,
-    major: p.major,
-    avatar: p.avatar,
-    cv_url: p.cvUrl,
-    email: p.email,
-    whatsapp: p.whatsapp,
-    github: p.github,
-    linkedin: p.linkedin,
-    instagram: p.instagram,
-  };
-}
+// ---- HEALTH ----
+app.get('/health', (_req, res) => res.json({ ok: true }));
 
-function mapDbToProfile(db: any) {
-  return {
-    name: db.name || '',
-    title: db.title || '',
-    bio: db.bio || '',
-    aboutLong: db.about_long || '',
-    school: db.school || '',
-    major: db.major || '',
-    avatar: db.avatar || '',
-    cvUrl: db.cv_url || '',
-    email: db.email || '',
-    whatsapp: db.whatsapp || '',
-    github: db.github || '',
-    linkedin: db.linkedin || '',
-    instagram: db.instagram || '',
-  };
-}
-
-function mapProjectToDb(p: any) {
-  return {
-    id: p.id,
-    title: p.title,
-    description: p.description,
-    image: p.image,
-    tech_stack: p.techStack,
-    github_url: p.githubUrl || '',
-    featured: p.featured,
-  };
-}
-
-function mapDbToProject(db: any) {
-  return {
-    id: db.id,
-    title: db.title,
-    description: db.description || '',
-    image: db.image || '',
-    techStack: db.tech_stack || [],
-    githubUrl: db.github_url || '',
-    featured: !!db.featured,
-  };
-}
-
-function mapSkillToDb(s: any) {
-  return {
-    id: s.id,
-    name: s.name,
-    category: s.category,
-    level: Number(s.level) || 80,
-  };
-}
-
-function mapDbToSkill(db: any) {
-  return {
-    id: db.id,
-    name: db.name || '',
-    category: db.category || 'Frontend',
-    level: Number(db.level) || 80,
-  };
-}
-
-function mapExperienceToDb(e: any) {
-  return {
-    id: e.id,
-    role: e.role,
-    company: e.company,
-    period: e.period,
-    description: e.description || '',
-    current: !!e.current,
-  };
-}
-
-function mapDbToExperience(db: any) {
-  return {
-    id: db.id,
-    role: db.role || '',
-    company: db.company || '',
-    period: db.period || '',
-    description: db.description || '',
-    current: !!db.current,
-  };
-}
-
-app.post('/api/supabase/push', adminLimiter, requireAdminAuth, async (req, res) => {
-  const supabase = requireSupabaseConfig(res);
-  if (!supabase) return;
-
+// ---- LOGIN ----
+app.post('/api/admin/login', adminLimiter, async (req, res) => {
+  const { username, password } = req.body || {};
   try {
-    const { profile, projects, skills, experiences } = req.body || {};
-
-    if (profile) {
-      const dbProfile = mapProfileToDb(profile);
-      const { error } = await supabase.from('profile').upsert(dbProfile);
-      if (error) throw error;
+    const config = await import('./admin-config.js').then(m => m.getAdminConfig());
+    if (username !== config.username) {
+      return res.status(401).json({ success: false, message: 'ACCESS DENIED: INVALID USERNAME' });
     }
-
-    if (Array.isArray(projects)) {
-      const dbProjects = projects.map(mapProjectToDb);
-      await supabase.from('projects').delete().neq('id', 'keep-all-dummy');
-      const { error } = await supabase.from('projects').insert(dbProjects);
-      if (error) throw error;
+    const valid = await verifyPassword(password);
+    if (!valid) {
+      return res.status(401).json({ success: false, message: 'ACCESS DENIED: WRONG PASSWORD' });
     }
-
-    if (Array.isArray(skills)) {
-      const dbSkills = skills.map(mapSkillToDb);
-      await supabase.from('skills').delete().neq('id', 'keep-all-dummy');
-      const { error } = await supabase.from('skills').insert(dbSkills);
-      if (error) throw error;
-    }
-
-    if (Array.isArray(experiences)) {
-      const dbExperiences = experiences.map(mapExperienceToDb);
-      await supabase.from('experiences').delete().neq('id', 'keep-all-dummy');
-      const { error } = await supabase.from('experiences').insert(dbExperiences);
-      if (error) throw error;
-    }
-
-    return res.json({ success: true, message: 'All local data successfully pushed to Supabase Cloud!' });
+    const token = issueAdminToken();
+    adminTokens.add(token);
+    return res.json({ success: true, token });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err?.message || 'Unknown error' });
+    return res.status(500).json({ success: false, message: err?.message || 'Login error' });
   }
 });
 
-// ----------------------------------------------------
-// INDIVIDUAL CRUD ENDPOINTS
-// ----------------------------------------------------
+// ---- UPLOAD IMAGE (generic) ----
+app.post('/api/admin/upload-image', adminLimiter, requireAdminAuth, upload.single('file'), async (req, res) => {
+  const supabaseUrl = process.env.SUPABASE_URL || '';
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const bucket = process.env.SUPABASE_STORAGE_BUCKET_PROJECTS || 'portfolio-project-images';
 
-// GET all data
-app.get('/api/admin/data', adminLimiter, requireAdminAuth, async (_req, res) => {
-  const supabase = requireSupabaseConfig(res);
-  if (!supabase) return;
+  if (!supabaseUrl || !supabaseKey) {
+    return res.status(500).json({ success: false, message: 'Supabase not configured' });
+  }
+  if (!req.file) {
+    return res.status(400).json({ success: false, message: 'Missing file' });
+  }
+
+  const file = req.file;
+  const folder = String(req.body?.folder || 'projects').trim();
 
   try {
-    const { data: profileDb } = await supabase.from('profile').select('*').eq('id', 'main').single();
-    const { data: projectsDb } = await supabase.from('projects').select('*');
-    const { data: skillsDb } = await supabase.from('skills').select('*');
-    const { data: expDb } = await supabase.from('experiences').select('*');
-
-    return res.json({
-      success: true,
-      payload: {
-        profile: profileDb ? mapDbToProfile(profileDb) : null,
-        projects: Array.isArray(projectsDb) ? projectsDb.map(mapDbToProject) : [],
-        skills: Array.isArray(skillsDb) ? skillsDb.map(mapDbToSkill) : [],
-        experiences: Array.isArray(expDb) ? expDb.map(mapDbToExperience) : [],
-      },
-    });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, message: err?.message || 'Unknown error' });
-  }
-});
-
-// Save profile
-app.post('/api/admin/profile', adminLimiter, requireAdminAuth, async (req, res) => {
-  const supabase = requireSupabaseConfig(res);
-  if (!supabase) return;
-
-  try {
-    const dbProfile = mapProfileToDb(req.body);
-    const { error } = await supabase.from('profile').upsert(dbProfile);
-    if (error) throw error;
-    return res.json({ success: true });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, message: err?.message });
-  }
-});
-
-// Save projects (bulk upsert)
-app.post('/api/admin/projects', adminLimiter, requireAdminAuth, async (req, res) => {
-  const supabase = requireSupabaseConfig(res);
-  if (!supabase) return;
-
-  try {
-    const projects = req.body;
-    if (!Array.isArray(projects)) return res.status(400).json({ success: false, message: 'Expected array' });
-    const dbProjects = projects.map(mapProjectToDb);
-    await supabase.from('projects').delete().neq('id', 'keep-all-dummy');
-    const { error } = await supabase.from('projects').insert(dbProjects);
-    if (error) throw error;
-    return res.json({ success: true });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, message: err?.message });
-  }
-});
-
-// Save skills (bulk upsert)
-app.post('/api/admin/skills', adminLimiter, requireAdminAuth, async (req, res) => {
-  const supabase = requireSupabaseConfig(res);
-  if (!supabase) return;
-
-  try {
-    const skills = req.body;
-    if (!Array.isArray(skills)) return res.status(400).json({ success: false, message: 'Expected array' });
-    const dbSkills = skills.map(mapSkillToDb);
-    await supabase.from('skills').delete().neq('id', 'keep-all-dummy');
-    const { error } = await supabase.from('skills').insert(dbSkills);
-    if (error) throw error;
-    return res.json({ success: true });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, message: err?.message });
-  }
-});
-
-// Save experiences (bulk upsert)
-app.post('/api/admin/experiences', adminLimiter, requireAdminAuth, async (req, res) => {
-  const supabase = requireSupabaseConfig(res);
-  if (!supabase) return;
-
-  try {
-    const experiences = req.body;
-    if (!Array.isArray(experiences)) return res.status(400).json({ success: false, message: 'Expected array' });
-    const dbExps = experiences.map(mapExperienceToDb);
-    await supabase.from('experiences').delete().neq('id', 'keep-all-dummy');
-    const { error } = await supabase.from('experiences').insert(dbExps);
-    if (error) throw error;
-    return res.json({ success: true });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, message: err?.message });
-  }
-});
-
-// Generic image upload to Supabase Storage
-// Expects multipart/form-data: file + folder (optional, default "projects")
-// Returns: { success: true, imageUrl: <signed-url> }
-app.post(
-  '/api/admin/upload-image',
-  adminLimiter,
-  requireAdminAuth,
-  upload.single('file'),
-  async (req, res) => {
-    const supabaseUrl = process.env.SUPABASE_URL || '';
-    const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-    const bucket = process.env.SUPABASE_STORAGE_BUCKET_PROJECTS || 'portfolio-project-images';
-
-    if (!supabaseUrl || !supabaseServiceRoleKey) {
-      return res.status(500).json({ success: false, message: 'Supabase not configured' });
-    }
-    if (!req.file) {
-      return res.status(400).json({ success: false, message: 'Missing file' });
-    }
-
-    const file = req.file;
-    const folder = String(req.body?.folder || 'projects').trim();
-
-    try {
-      const supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
-        auth: { persistSession: false, autoRefreshToken: false },
-      });
-
-      const ext = path.extname(file.originalname || '').toLowerCase() || '.png';
-      const safeExt = ext.startsWith('.') ? ext.slice(1) : ext;
-      const objectPath = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2)}.${safeExt}`;
-
-      const { error: uploadErr } = await supabase.storage
-        .from(bucket)
-        .upload(objectPath, file.buffer, { contentType: file.mimetype, upsert: true });
-
-      if (uploadErr) throw uploadErr;
-
-      const { data, error: signedUrlErr } = await supabase.storage
-        .from(bucket)
-        .createSignedUrl(objectPath, 7 * 24 * 60 * 60);
-
-      if (signedUrlErr) throw signedUrlErr;
-      if (!data?.signedUrl) {
-        return res.status(500).json({ success: false, message: 'Signed URL missing' });
-      }
-
-      return res.json({ success: true, imageUrl: data.signedUrl });
-    } catch (err: any) {
-      return res.status(500).json({ success: false, message: err?.message || 'Upload failed' });
-    }
-  }
-);
-
-// Upload project image to Supabase Storage (bucket private + signed URL)
-// Expects multipart/form-data with fields:
-// - file: image
-// - projectId (optional): to build object path
-//
-// Returns: { success: true, imageUrl: <signed-url> }
-app.post(
-  '/api/admin/upload-project-image',
-  adminLimiter,
-  requireAdminAuth,
-  upload.single('file'),
-  async (req, res) => {
-    const supabaseUrl = process.env.SUPABASE_URL || '';
-    const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-
-    const bucket = process.env.SUPABASE_STORAGE_BUCKET_PROJECTS || 'portfolio-project-images';
-
-    const projectId = String(req.body?.projectId || '').trim();
-    const originalName = req.file?.originalname || '';
-    const mimetype = req.file?.mimetype || '';
-    const fileSize = req.file?.size ?? 0;
-
-    if (!supabaseUrl || !supabaseServiceRoleKey) {
-      console.error('[upload-project-image] Supabase env missing:', {
-        SUPABASE_URL_present: !!supabaseUrl,
-        SUPABASE_SERVICE_ROLE_KEY_present: !!supabaseServiceRoleKey,
-        bucket,
-        projectId,
-        originalName,
-      });
-      return res.status(500).json({
-        success: false,
-        message: 'Supabase is not configured on backend. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.',
-      });
-    }
-
-    if (!req.file) {
-      console.warn('[upload-project-image] Missing file field (multipart/form-data)', {
-        projectId,
-      });
-      return res.status(400).json({ success: false, message: 'Missing file field (multipart/form-data)' });
-    }
-
-    // TS typing guard for multer single file uploads
-    const file = req.file;
-
-    try {
-      const supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
-        auth: { persistSession: false, autoRefreshToken: false },
-      });
-
-      const ext = path.extname(file.originalname || '').toLowerCase() || '.png';
-      const safeExt = ext.startsWith('.') ? ext.slice(1) : ext;
-      const objectPath = `projects/${projectId ? projectId + '/' : ''}${Date.now()}-${Math.random().toString(36).slice(2)}.${safeExt}`;
-
-      console.log('[upload-project-image] Attempt upload to Supabase Storage:', {
-        bucket,
-        objectPath,
-        projectId,
-        file: {
-          originalName: file.originalname,
-          mimetype: file.mimetype,
-          size: file.size,
-        },
-      });
-
-      const { error: uploadErr } = await supabase.storage
-        .from(bucket)
-        .upload(objectPath, file.buffer, {
-          contentType: file.mimetype,
-          upsert: true,
-        });
-
-      if (uploadErr) {
-        console.error('[upload-project-image] Storage upload failed:', {
-          message: uploadErr.message,
-          status: (uploadErr as any).status,
-          name: uploadErr.name,
-        });
-        throw uploadErr;
-      }
-
-      // signed URL for 7 days
-      const expiresInSeconds = 7 * 24 * 60 * 60;
-      console.log('[upload-project-image] Creating signed URL:', {
-        bucket,
-        objectPath,
-        expiresInSeconds,
-      });
-
-      const { data, error: signedUrlErr } = await supabase.storage
-        .from(bucket)
-        .createSignedUrl(objectPath, expiresInSeconds);
-
-      if (signedUrlErr) {
-        console.error('[upload-project-image] createSignedUrl failed:', {
-          message: signedUrlErr.message,
-          status: (signedUrlErr as any).status,
-          name: signedUrlErr.name,
-        });
-        return res.status(500).json({
-          success: false,
-          message: `Failed to create signed URL: ${signedUrlErr.message || 'unknown error'}`,
-        });
-      }
-
-      if (!data?.signedUrl) {
-        console.error('[upload-project-image] Signed URL missing in response:', { bucket, objectPath });
-        return res.status(500).json({ success: false, message: 'Failed to create signed URL (signedUrl missing)' });
-      }
-
-      return res.json({ success: true, imageUrl: data.signedUrl });
-
-    } catch (err: any) {
-      console.error('[upload-project-image] Unexpected error:', {
-        projectId,
-        bucket,
-        file: {
-          originalName,
-          mimetype,
-          fileSize,
-        },
-        errorMessage: err?.message,
-        errorName: err?.name,
-      });
-      return res.status(500).json({
-        success: false,
-        message: err?.message || 'Upload failed',
-      });
-    }
-  }
-);
-
-app.post('/api/supabase/pull', adminLimiter, requireAdminAuth, async (_req, res) => {
-  const supabase = requireSupabaseConfig(res);
-  if (!supabase) return;
-
-  try {
-    const { data: profileDb, error: profErr } = await supabase
-      .from('profile')
-      .select('*')
-      .eq('id', 'main')
-      .single();
-
-    const { data: projectsDb, error: projErr } = await supabase.from('projects').select('*');
-    const { data: skillsDb, error: skillErr } = await supabase.from('skills').select('*');
-    const { data: expDb, error: expErr } = await supabase.from('experiences').select('*');
-
-    if (profErr) throw profErr;
-    if (projErr) throw projErr;
-    if (skillErr) throw skillErr;
-    if (expErr) throw expErr;
-
-    const payload = {
-      profile: profileDb ? mapDbToProfile(profileDb) : null,
-      projects: Array.isArray(projectsDb) ? projectsDb.map(mapDbToProject) : [],
-      skills: Array.isArray(skillsDb) ? skillsDb.map(mapDbToSkill) : [],
-      experiences: Array.isArray(expDb) ? expDb.map(mapDbToExperience) : [],
-    };
-
-    return res.json({
-      success: true,
-      message: 'Database successfully synchronized from Supabase Cloud!',
-      payload,
-    });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, message: err?.message || 'Unknown error' });
-  }
-});
-
-// ----------------------------------------------------
-// PUBLIC API (no auth needed)
-// ----------------------------------------------------
-app.get('/api/public/data', async (_req, res) => {
-  try {
-    const supabaseUrl = process.env.SUPABASE_URL || '';
-    const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-
-    if (!supabaseUrl || !supabaseServiceRoleKey) {
-      return res.status(500).json({ success: false, message: 'Supabase not configured' });
-    }
-
-    const supabase = createClient(supabaseUrl, supabaseServiceRoleKey, {
+    const supabase = createClient(supabaseUrl, supabaseKey, {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
-    let profileDb = null;
+    const ext = path.extname(file.originalname || '').toLowerCase() || '.png';
+    const safeExt = ext.startsWith('.') ? ext.slice(1) : ext;
+    const objectPath = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2)}.${safeExt}`;
+
+    const { error: uploadErr } = await supabase.storage
+      .from(bucket)
+      .upload(objectPath, file.buffer, { contentType: file.mimetype, upsert: true });
+    if (uploadErr) throw uploadErr;
+
+    const { data, error: signedErr } = await supabase.storage
+      .from(bucket)
+      .createSignedUrl(objectPath, 7 * 24 * 60 * 60);
+    if (signedErr) throw signedErr;
+    if (!data?.signedUrl) return res.status(500).json({ success: false, message: 'Signed URL missing' });
+
+    return res.json({ success: true, imageUrl: data.signedUrl });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'Upload failed' });
+  }
+});
+
+// ---- PUBLIC DATA ----
+app.get('/api/public/data', async (_req, res) => {
+  try {
+    const supabaseUrl = process.env.SUPABASE_URL || '';
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+    if (!supabaseUrl || !supabaseKey) {
+      return res.json({ success: true, payload: { profile: null, projects: [], skills: [], experiences: [] } });
+    }
+    const supabase = createClient(supabaseUrl, supabaseKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    let profileDb: any = null;
     let projectsDb: any[] = [];
     let skillsDb: any[] = [];
     let expDb: any[] = [];
-
     try { const r = await supabase.from('profile').select('*').eq('id', 'main').single(); profileDb = r.data; } catch {}
     try { const r = await supabase.from('projects').select('*'); projectsDb = r.data || []; } catch {}
     try { const r = await supabase.from('skills').select('*'); skillsDb = r.data || []; } catch {}
     try { const r = await supabase.from('experiences').select('*'); expDb = r.data || []; } catch {}
 
+    function mapProfile(p: any) {
+      return { name: p.name || '', title: p.title || '', bio: p.bio || '', aboutLong: p.about_long || '',
+        school: p.school || '', major: p.major || '', avatar: p.avatar || '', cvUrl: p.cv_url || '',
+        email: p.email || '', whatsapp: p.whatsapp || '', github: p.github || '',
+        linkedin: p.linkedin || '', instagram: p.instagram || '' };
+    }
+    function mapProject(p: any) {
+      return { id: p.id, title: p.title, description: p.description || '', image: p.image || '',
+        techStack: p.tech_stack || [], githubUrl: p.github_url || '', featured: !!p.featured };
+    }
+    function mapSkill(s: any) {
+      return { id: s.id, name: s.name || '', category: s.category || 'Frontend', level: Number(s.level) || 80 };
+    }
+    function mapExp(e: any) {
+      return { id: e.id, role: e.role || '', company: e.company || '', period: e.period || '',
+        description: e.description || '', current: !!e.current };
+    }
+
     return res.json({
       success: true,
       payload: {
-        profile: profileDb ? mapDbToProfile(profileDb) : null,
-        projects: Array.isArray(projectsDb) ? projectsDb.map(mapDbToProject) : [],
-        skills: Array.isArray(skillsDb) ? skillsDb.map(mapDbToSkill) : [],
-        experiences: Array.isArray(expDb) ? expDb.map(mapDbToExperience) : [],
+        profile: profileDb ? mapProfile(profileDb) : null,
+        projects: projectsDb.map(mapProject),
+        skills: skillsDb.map(mapSkill),
+        experiences: expDb.map(mapExp),
       },
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, message: err?.message || 'Unknown error' });
+    return res.status(500).json({ success: false, message: err?.message });
   }
 });
 
 const port = process.env.PORT ? Number(process.env.PORT) : 4000;
-app.listen(port, () => {
-  // eslint-disable-next-line no-console
-  console.log(`[backend] listening on :${port}`);
-});
-
+app.listen(port, () => console.log(`[backend] listening on :${port}`));
