@@ -1,14 +1,17 @@
 import { createClient } from '@supabase/supabase-js';
-import bcrypt from 'bcryptjs';
+import crypto from 'node:crypto';
 
 export type AdminConfig = {
   username: string;
   passwordHash: string;
 };
 
-const SALT_ROUNDS = 10;
 const DEFAULT_USERNAME = 'admin';
 const DEFAULT_PASSWORD = 'admin123';
+
+function hashPassword(password: string): string {
+  return crypto.createHash('sha256').update(password + 'portoko-salt-2024').digest('hex');
+}
 
 function getSupabaseClient() {
   const url = process.env.SUPABASE_URL || '';
@@ -19,7 +22,7 @@ function getSupabaseClient() {
   });
 }
 
-async function readConfigFromDb(): Promise<AdminConfig | null> {
+async function readHashFromDb(): Promise<string | null> {
   const supabase = getSupabaseClient();
   if (!supabase) return null;
 
@@ -31,24 +34,20 @@ async function readConfigFromDb(): Promise<AdminConfig | null> {
       .single();
 
     if (error || !data?.value) return null;
-
-    return {
-      username: DEFAULT_USERNAME,
-      passwordHash: data.value,
-    };
+    return data.value;
   } catch {
     return null;
   }
 }
 
-async function writeConfigToDb(hash: string): Promise<boolean> {
+async function writeHashToDb(hash: string): Promise<boolean> {
   const supabase = getSupabaseClient();
   if (!supabase) return false;
 
   try {
     const { error } = await supabase
       .from('admin_settings')
-      .upsert({ key: 'admin_password_hash', value: hash, updated_at: new Date().toISOString() });
+      .upsert({ key: 'admin_password_hash', value: hash, updated_at: new Date().toISOString() }, { onConflict: 'key' });
 
     return !error;
   } catch {
@@ -57,30 +56,23 @@ async function writeConfigToDb(hash: string): Promise<boolean> {
 }
 
 export async function getAdminConfig(): Promise<AdminConfig> {
-  const dbConfig = await readConfigFromDb();
-  if (dbConfig) return dbConfig;
+  const hash = await readHashFromDb();
+  if (hash) return { username: DEFAULT_USERNAME, passwordHash: hash };
 
-  // First time: create default password hash and save to DB
-  const defaultHash = await bcrypt.hash(DEFAULT_PASSWORD, SALT_ROUNDS);
-  await writeConfigToDb(defaultHash);
-
-  return {
-    username: DEFAULT_USERNAME,
-    passwordHash: defaultHash,
-  };
+  const defaultHash = hashPassword(DEFAULT_PASSWORD);
+  await writeHashToDb(defaultHash);
+  return { username: DEFAULT_USERNAME, passwordHash: defaultHash };
 }
 
 export async function verifyPassword(plainPassword: string): Promise<boolean> {
   const config = await getAdminConfig();
-  return bcrypt.compare(plainPassword, config.passwordHash);
+  const inputHash = hashPassword(plainPassword);
+  return inputHash === config.passwordHash;
 }
 
 export async function updateAdminPassword(newPassword: string): Promise<boolean> {
-  const newHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
-  return writeConfigToDb(newHash);
+  const newHash = hashPassword(newPassword);
+  return writeHashToDb(newHash);
 }
 
-// Kept for backward compatibility but now async
-export function setAdminConfig(_next: AdminConfig): void {
-  // No-op: use updateAdminPassword instead
-}
+export function setAdminConfig(_next: AdminConfig): void {}
