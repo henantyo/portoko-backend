@@ -97,6 +97,42 @@ app.post('/api/admin/upload-image', adminLimiter, requireAdminAuth, upload.singl
   }
 });
 
+// ---- SAVE PROFILE TO SUPABASE ----
+app.post('/api/admin/profile', adminLimiter, requireAdminAuth, async (req, res) => {
+  const supabaseUrl = process.env.SUPABASE_URL || '';
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  if (!supabaseUrl || !supabaseKey) {
+    return res.status(500).json({ success: false, message: 'Supabase not configured' });
+  }
+
+  try {
+    const p = req.body;
+    const supabase = createClient(supabaseUrl, supabaseKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const { error } = await supabase.from('profile').upsert({
+      id: 'main',
+      name: p.name || '',
+      title: p.title || '',
+      bio: p.bio || '',
+      about_long: p.aboutLong || '',
+      school: p.school || '',
+      major: p.major || '',
+      avatar: p.avatar || '',
+      cv_url: p.cvUrl || '',
+      email: p.email || '',
+      whatsapp: p.whatsapp || '',
+      github: p.github || '',
+      linkedin: p.linkedin || '',
+      instagram: p.instagram || '',
+    }, { onConflict: 'id' });
+    if (error) throw error;
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
 // ---- PUBLIC DATA ----
 app.get('/api/public/data', async (_req, res) => {
   try {
