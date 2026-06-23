@@ -133,6 +133,61 @@ app.post('/api/admin/profile', adminLimiter, requireAdminAuth, async (req, res) 
   }
 });
 
+// ---- SYNC ALL DATA TO SUPABASE ----
+app.post('/api/admin/sync-all', adminLimiter, requireAdminAuth, async (req, res) => {
+  const supabaseUrl = process.env.SUPABASE_URL || '';
+  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  if (!supabaseUrl || !supabaseKey) {
+    return res.status(500).json({ success: false, message: 'Supabase not configured' });
+  }
+
+  try {
+    const { projects, skills, experiences } = req.body || {};
+    const supabase = createClient(supabaseUrl, supabaseKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+
+    if (Array.isArray(projects)) {
+      await supabase.from('projects').delete().neq('id', 'keep-all-dummy');
+      const dbProjects = projects.map((p: any) => ({
+        id: p.id, title: p.title, description: p.description || '', image: p.image || '',
+        tech_stack: p.techStack || [], github_url: p.githubUrl || '', featured: !!p.featured,
+      }));
+      if (dbProjects.length) {
+        const { error } = await supabase.from('projects').insert(dbProjects);
+        if (error) throw error;
+      }
+    }
+
+    if (Array.isArray(skills)) {
+      await supabase.from('skills').delete().neq('id', 'keep-all-dummy');
+      const dbSkills = skills.map((s: any) => ({
+        id: s.id, name: s.name, category: s.category || 'Frontend', level: Number(s.level) || 80,
+      }));
+      if (dbSkills.length) {
+        const { error } = await supabase.from('skills').insert(dbSkills);
+        if (error) throw error;
+      }
+    }
+
+    if (Array.isArray(experiences)) {
+      await supabase.from('experiences').delete().neq('id', 'keep-all-dummy');
+      const dbExps = experiences.map((e: any) => ({
+        id: e.id, role: e.role, company: e.company, period: e.period,
+        description: e.description || '', current: !!e.current,
+      }));
+      if (dbExps.length) {
+        const { error } = await supabase.from('experiences').insert(dbExps);
+        if (error) throw error;
+      }
+    }
+
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message });
+  }
+});
+
 // ---- PUBLIC DATA ----
 app.get('/api/public/data', async (_req, res) => {
   try {
